@@ -18,320 +18,524 @@
  * Authors: George F. Riley<riley@ece.gatech.edu>
  *          Mathieu Lacage <mathieu.lacage@sophia.inria.fr>
  */
-#ifndef NODE_H
-#define NODE_H
 
-#include <vector>
-
-#include "ns3/object.h"
-#include "ns3/callback.h"
-#include "ns3/ptr.h"
-#include "ns3/net-device.h"
+#include <cmath>
+#include "node.h"
+#include "node-list.h"
+#include "net-device.h"
+#include "application.h"
+#include "ns3/packet.h"
+#include "ns3/simulator.h"
+#include "ns3/object-vector.h"
+#include "ns3/uinteger.h"
+#include "ns3/log.h"
+#include "ns3/assert.h"
+#include "ns3/global-value.h"
+#include "ns3/boolean.h"
 #include "ns3/string.h"
-#include "ns3/nstime.h"
-#include "ns3/event-id.h"
+#include "ns3/double.h"
+#include "ns3/object.h"
 
-namespace ns3 {
+#include "ns3/control-layer-helper.h"
 
-class Application;
-class Packet;
-class Address;
-class Time;
-
-
-/**
- * \ingroup network
- *
- * \brief A network Node.
- *
- * This class holds together:
- *   - a list of NetDevice objects which represent the network interfaces
- *     of this node which are connected to other Node instances through
- *     Channel instances.
- *   - a list of Application objects which represent the userspace
- *     traffic generation applications which interact with the Node
- *     through the Socket API.
- *   - a node Id: a unique per-node identifier.
- *   - a system Id: a unique Id used for parallel simulations.
- *
- * Every Node created is added to the NodeList automatically.
- */
-class Node : public Object
+namespace ns3
 {
-public:
-  /**
-   * \brief Get the type ID.
-   * \return the object TypeId
-   */
-  static TypeId GetTypeId (void);
 
-  Node();
-  /**
-   * \param systemId a unique integer used for parallel simulations.
-   */
-  Node(uint32_t systemId);
+  NS_LOG_COMPONENT_DEFINE("Node");
 
-  virtual ~Node();
+  NS_OBJECT_ENSURE_REGISTERED(Node);
 
   /**
-   * \returns the unique id of this node.
-   * 
-   * This unique id happens to be also the index of the Node into
-   * the NodeList. 
-   */
-  uint32_t GetId (void) const;
+ * \relates Node
+ * \anchor GlobalValueChecksumEnabled
+ * \brief A global switch to enable all checksums for all protocols.
+ */
+  static GlobalValue g_checksumEnabled = GlobalValue("ChecksumEnabled",
+                                                     "A global switch to enable all checksums for all protocols",
+                                                     BooleanValue(false),
+                                                     MakeBooleanChecker());
 
-// -----------------------------------------------
+  TypeId
+  Node::GetTypeId(void)
+  {
+    static TypeId tid = TypeId("ns3::Node")
+                            .SetParent<Object>()
+                            .SetGroupName("Network")
+                            .AddConstructor<Node>()
+                            .AddAttribute("DeviceList", "The list of devices associated to this Node.",
+                                          ObjectVectorValue(),
+                                          MakeObjectVectorAccessor(&Node::m_devices),
+                                          MakeObjectVectorChecker<NetDevice>())
+                            .AddAttribute("ApplicationList", "The list of applications associated to this Node.",
+                                          ObjectVectorValue(),
+                                          MakeObjectVectorAccessor(&Node::m_applications),
+                                          MakeObjectVectorChecker<Application>())
+                            .AddAttribute("Id", "The id (unique integer) of this Node.",
+                                          TypeId::ATTR_GET, // allow only getting it.
+                                          UintegerValue(0),
+                                          MakeUintegerAccessor(&Node::m_id),
+                                          MakeUintegerChecker<uint32_t>())
+                            .AddAttribute("SystemId", "The systemId of this node: a unique integer used for parallel simulations.",
+                                          TypeId::ATTR_GET | TypeId::ATTR_SET,
+                                          UintegerValue(0),
+                                          MakeUintegerAccessor(&Node::m_sid),
+                                          MakeUintegerChecker<uint32_t>())
+                            .AddAttribute("Power", "Carga atual da bateria. (%)",
+                                          DoubleValue(100.0),
+                                          MakeDoubleAccessor(&Node::power),
+                                          MakeDoubleChecker<double>(0.0, 100.0))
+                            .AddAttribute("InitialConsumption", "Consumo inicial da bateria. (%/s)",
+                                          DoubleValue(0),
+                                          MakeDoubleAccessor(&Node::initialConsumption),
+                                          MakeDoubleChecker<double>(0.0, 100.0))
+                            .AddAttribute("CurrentConsumption", "Consumo autal da bateria. (%/s)",
+                                          DoubleValue(0),
+                                          MakeDoubleAccessor(&Node::currentConsumption),
+                                          MakeDoubleChecker<double>())
+                            .AddAttribute("CPU", "Informações sobre o processador. (Gb)",
+                                          DoubleValue(3.0),
+                                          MakeDoubleAccessor(&Node::cpu),
+                                          MakeDoubleChecker<double>())
+                            .AddAttribute("Memory", "Informações sobre a memória. (Gb)",
+                                          DoubleValue(8.0),
+                                          MakeDoubleAccessor(&Node::memory),
+                                          MakeDoubleChecker<double>())
+                            .AddAttribute("Transmission", "Capacidade de transmissão. (Mb/s)",
+                                          DoubleValue(100.0),
+                                          MakeDoubleAccessor(&Node::transmission),
+                                          MakeDoubleChecker<double>())
+                            .AddAttribute("Storage", "Informação sobre armazenamento. (Gb)",
+                                          DoubleValue(5.0),
+                                          MakeDoubleAccessor(&Node::storage),
+                                          MakeDoubleChecker<double>());
+    return tid;
+  }
 
-  double GetPower (void);
+  Node::Node()
+      : m_id(0),
+        m_sid(0)
+  {
+    NS_LOG_FUNCTION(this);
+    Construct();
+  }
 
-  double GetInitialConsumption (void) const;
+  Node::Node(uint32_t sid)
+      : m_id(0),
+        m_sid(sid)
+  {
+    NS_LOG_FUNCTION(this << sid);
+    Construct();
+  }
 
-  double GetCurrentConsumption (void) const;
+  void
+  Node::Construct(void)
+  {
+    NS_LOG_FUNCTION(this);
+    m_id = NodeList::Add(this);
+    lastSet = Seconds(0); // Tempo da ultima medicao do CurrentPower.
+    Simulator::Schedule(Seconds(0), &Node::UpdateEvent, this); // Inicializa o evento de fim de bateria
+  }
 
-  double GetCpu (void) const;
+  Node::~Node()
+  {
+    NS_LOG_FUNCTION(this);
+  }
 
-  double GetMemory (void) const;
+  uint32_t
+  Node::GetId(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return m_id;
+  }
 
-  double GetTransmission (void) const;
+  // -----------------------------------------------
 
-  double GetStorage (void) const;
+  double
+  Node::GetPower(void)
+  {
+    NS_LOG_FUNCTION(this);
+    AttPower();
+    return power;
+  }
 
-  void UpdateEvent (void);
+  double
+  Node::GetInitialConsumption(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return initialConsumption;
+  }
 
-  void OutOfPower (void);
+  double
+  Node::GetCurrentConsumption(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return currentConsumption;
+  }
 
-  void AttPower (void);
+  double
+  Node::GetCpu(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return cpu;
+  }
 
-  void AddApplication (void);
+  double
+  Node::GetMemory(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return memory;
+  }
 
-  void RemoveApplication (void);
+  double
+  Node::GetTransmission(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return transmission;
+  }
 
+  double
+  Node::GetStorage(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return storage;
+  }
 
-// -----------------------------------------------
+  // Cria um evento que avisa ao controller quando o nó está sem bateria
+  void
+  Node::UpdateEvent(void)
+  {
+    Simulator::Cancel(outOfPowerEvent);
+    if (this->GetCurrentConsumption () > 0.0)
+    {
+      // std::cout <<"Node: " << this->GetId() << 
+      // " - Agora: " << Simulator::Now() << 
+      // " - Escalonamento para: " << Simulator::Now() + Seconds(power / currentConsumption) << 
+      // " - Power: " << this->GetPower() << 
+      // " - CurrentConsumption: " << this->GetCurrentConsumption() << 
+      // std::endl;
+      outOfPowerEvent = Simulator::Schedule(Seconds(power / currentConsumption), &Node::OutOfPower, this);
+    }
+  }
 
-  /**
-   * In the future, ns3 nodes may have clock that returned a local time
-   * different from the virtual time Simulator::Now().
-   * This function is currently a placeholder to ease the development of this feature.
-   * For now, it is only an alias to Simulator::Now()
-   *
-   * \return The time as seen by this node
-   */
-  Time GetLocalTime (void) const;
+  // Método temporário para o término da bateria (será trocado pelo método do controller)
+  void
+  Node::OutOfPower(void)
+  {
+    NS_LOG_FUNCTION(this);
+    std::cout << "At time " << Simulator::Now().GetSeconds() << "s: ";
+    std::cout << "Node " << m_id << " out of power." << std::endl;
 
-  /**
-   * \returns the system id for parallel simulations associated
-   *          to this node.
-   */
-  uint32_t GetSystemId (void) const;
+    std::ostringstream oss;
+    oss << "\"name\":\"" << "OutOfPower" << "\"\"time\":\"" << Simulator::Now().GetSeconds() << "\"\"sourceID\":\"" << m_id << "\"\"destinationID\":\"" << 0 << "\"";
+    std::string data = oss.str();
 
-  /**
-   * \brief Associate a NetDevice to this node.
-   *
-   * \param device NetDevice to associate to this node.
-   * \returns the index of the NetDevice into the Node's list of
-   *          NetDevice.
-   */
-  uint32_t AddDevice (Ptr<NetDevice> device);
-  /**
-   * \brief Retrieve the index-th NetDevice associated to this node.
-   *
-   * \param index the index of the requested NetDevice
-   * \returns the requested NetDevice.
-   */
-  Ptr<NetDevice> GetDevice (uint32_t index) const;
-  /**
-   * \returns the number of NetDevice instances associated
-   *          to this Node.
-   */
-  uint32_t GetNDevices (void) const;
+    //criando pacote escrevendo conteúdo
+    Ptr<Packet> p = Create<Packet>(reinterpret_cast<const uint8_t *>(data.c_str()), data.size());
 
-  /**
-   * \brief Associate an Application to this Node.
-   *
-   * \param application Application to associate to this node.
-   * \returns the index of the Application within the Node's list
-   *          of Application.
-   */
-  uint32_t AddApplication (Ptr<Application> application);
-  /**
-   * \brief Retrieve the index-th Application associated to this node.
-   *
-   * \param index the index of the requested Application
-   * \returns the requested Application.
-   */
-  Ptr<Application> GetApplication (uint32_t index) const;
+     //enviando pacote
+    TypeId tid = TypeId::LookupByName("ns3::UdpSocketFactory");
+    Ptr<Socket> m_socket = Socket::CreateSocket(this, tid);
+    Inet6SocketAddress local = Inet6SocketAddress(Ipv6Address::GetAny(), 9999);
+    if (m_socket->Bind(local) == -1)
+    {
+      NS_FATAL_ERROR("Failed to bind socket");
+    }
+    Inet6SocketAddress remote = Inet6SocketAddress(Ipv6Address("fe80::a:ff:fe00:1"), 9);
+    m_socket->Connect(remote);
+    m_socket->Send(p);
+  }
 
-  /**
-   * \returns the number of Application instances associated to this Node.
-   */
-  uint32_t GetNApplications (void) const;
+  // Atualiza a quantidade de carga da bateria
+  void
+  Node::AttPower(void)
+  {
+    NS_LOG_FUNCTION(this);
+    double toSubtract = (Simulator::Now() - lastSet).GetSeconds() * currentConsumption;
+    power -= toSubtract > power ? power : toSubtract;
+    lastSet = Simulator::Now();
+  }
 
-  /**
-   * A protocol handler
-   *
-   * \param device a pointer to the net device which received the packet
-   * \param packet the packet received
-   * \param protocol the 16 bit protocol number associated with this packet.
-   *        This protocol number is expected to be the same protocol number
-   *        given to the Send method by the user on the sender side.
-   * \param sender the address of the sender
-   * \param receiver the address of the receiver; Note: this value is
-   *                 only valid for promiscuous mode protocol
-   *                 handlers.  Note:  If the L2 protocol does not use L2
-   *                 addresses, the address reported here is the value of 
-   *                 device->GetAddress().
-   * \param packetType type of packet received
-   *                   (broadcast/multicast/unicast/otherhost); Note:
-   *                   this value is only valid for promiscuous mode
-   *                   protocol handlers.
-   */
-  typedef Callback<void,Ptr<NetDevice>, Ptr<const Packet>,uint16_t,const Address &,
-                   const Address &, NetDevice::PacketType> ProtocolHandler;
-  /**
-   * \param handler the handler to register
-   * \param protocolType the type of protocol this handler is 
-   *        interested in. This protocol type is a so-called
-   *        EtherType, as registered here:
-   *        http://standards.ieee.org/regauth/ethertype/eth.txt
-   *        the value zero is interpreted as matching all
-   *        protocols.
-   * \param device the device attached to this handler. If the
-   *        value is zero, the handler is attached to all
-   *        devices on this node.
-   * \param promiscuous whether to register a promiscuous mode handler
-   */
-  void RegisterProtocolHandler (ProtocolHandler handler, 
+  // Atualiza a bateria, modifica o consumo e atualiza quando a bateria irá acabar
+  // Para entrada de novas aplicações
+  void
+  Node::AddApplication(void)
+  {
+    NS_LOG_FUNCTION(this);
+    std::cout << "At time " << Simulator::Now().GetSeconds() << "s: ";
+    std::cout << "AddApplication called at node " << this->GetId() << std::endl;
+    AttPower();
+    currentConsumption += initialConsumption;
+    UpdateEvent();
+  }
+
+  // Atualiza a bateria, modifica o consumo e atualiza quando a bateria irá acabar
+  // Para finalização de aplicações
+  void
+  Node::RemoveApplication(void)
+  {
+    NS_LOG_FUNCTION(this);
+    std::cout << "At time " << Simulator::Now().GetSeconds() << "s: ";
+    std::cout << "RemoveApplication called at node " << this->GetId() << std::endl;
+    AttPower();
+    currentConsumption -= initialConsumption;
+    UpdateEvent();
+  }
+
+  // -----------------------------------------------
+
+  Time
+  Node::GetLocalTime(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return Simulator::Now();
+  }
+
+  uint32_t
+  Node::GetSystemId(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return m_sid;
+  }
+
+  uint32_t
+  Node::AddDevice(Ptr<NetDevice> device)
+  {
+    NS_LOG_FUNCTION(this << device);
+    uint32_t index = m_devices.size();
+    m_devices.push_back(device);
+    device->SetNode(this);
+    device->SetIfIndex(index);
+    device->SetReceiveCallback(MakeCallback(&Node::NonPromiscReceiveFromDevice, this));
+    Simulator::ScheduleWithContext(GetId(), Seconds(0.0),
+                                   &NetDevice::Initialize, device);
+    NotifyDeviceAdded(device);
+    return index;
+  }
+  Ptr<NetDevice>
+  Node::GetDevice(uint32_t index) const
+  {
+    NS_LOG_FUNCTION(this << index);
+    NS_ASSERT_MSG(index < m_devices.size(), "Device index " << index << " is out of range (only have " << m_devices.size() << " devices).");
+    return m_devices[index];
+  }
+  uint32_t
+  Node::GetNDevices(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return m_devices.size();
+  }
+
+  uint32_t
+  Node::AddApplication(Ptr<Application> application)
+  {
+    NS_LOG_FUNCTION(this << application);
+    uint32_t index = m_applications.size();
+    m_applications.push_back(application);
+    application->SetNode(this);
+    Simulator::ScheduleWithContext(GetId(), Seconds(0.0),
+                                   &Application::Initialize, application);
+    return index;
+  }
+  Ptr<Application>
+  Node::GetApplication(uint32_t index) const
+  {
+    NS_LOG_FUNCTION(this << index);
+    NS_ASSERT_MSG(index < m_applications.size(), "Application index " << index << " is out of range (only have " << m_applications.size() << " applications).");
+    return m_applications[index];
+  }
+  uint32_t
+  Node::GetNApplications(void) const
+  {
+    NS_LOG_FUNCTION(this);
+    return m_applications.size();
+  }
+
+  void
+  Node::DoDispose()
+  {
+    NS_LOG_FUNCTION(this);
+    m_deviceAdditionListeners.clear();
+    m_handlers.clear();
+    for (std::vector<Ptr<NetDevice>>::iterator i = m_devices.begin();
+         i != m_devices.end(); i++)
+    {
+      Ptr<NetDevice> device = *i;
+      device->Dispose();
+      *i = 0;
+    }
+    m_devices.clear();
+    for (std::vector<Ptr<Application>>::iterator i = m_applications.begin();
+         i != m_applications.end(); i++)
+    {
+      Ptr<Application> application = *i;
+      application->Dispose();
+      *i = 0;
+    }
+    m_applications.clear();
+    Object::DoDispose();
+  }
+  void
+  Node::DoInitialize(void)
+  {
+    NS_LOG_FUNCTION(this);
+    for (std::vector<Ptr<NetDevice>>::iterator i = m_devices.begin();
+         i != m_devices.end(); i++)
+    {
+      Ptr<NetDevice> device = *i;
+      device->Initialize();
+    }
+    for (std::vector<Ptr<Application>>::iterator i = m_applications.begin();
+         i != m_applications.end(); i++)
+    {
+      Ptr<Application> application = *i;
+      application->Initialize();
+    }
+
+    Object::DoInitialize();
+  }
+
+  void
+  Node::RegisterProtocolHandler(ProtocolHandler handler,
                                 uint16_t protocolType,
                                 Ptr<NetDevice> device,
-                                bool promiscuous=false);
-  /**
-   * \param handler the handler to unregister
-   *
-   * After this call returns, the input handler will never
-   * be invoked anymore.
-   */
-  void UnregisterProtocolHandler (ProtocolHandler handler);
+                                bool promiscuous)
+  {
+    NS_LOG_FUNCTION(this << &handler << protocolType << device << promiscuous);
+    struct Node::ProtocolHandlerEntry entry;
+    entry.handler = handler;
+    entry.protocol = protocolType;
+    entry.device = device;
+    entry.promiscuous = promiscuous;
 
-  /**
-   * A callback invoked whenever a device is added to a node.
-   */
-  typedef Callback<void,Ptr<NetDevice> > DeviceAdditionListener;
-  /**
-   * \param listener the listener to add
-   *
-   * Add a new listener to the list of listeners for the device-added
-   * event. When a new listener is added, it is notified of the existence
-   * of all already-added devices to make discovery of devices easier.
-   */
-  void RegisterDeviceAdditionListener (DeviceAdditionListener listener);
-  /**
-   * \param listener the listener to remove
-   *
-   * Remove an existing listener from the list of listeners for the 
-   * device-added event.
-   */
-  void UnregisterDeviceAdditionListener (DeviceAdditionListener listener);
+    // On demand enable promiscuous mode in netdevices
+    if (promiscuous)
+    {
+      if (device == 0)
+      {
+        for (std::vector<Ptr<NetDevice>>::iterator i = m_devices.begin();
+             i != m_devices.end(); i++)
+        {
+          Ptr<NetDevice> dev = *i;
+          dev->SetPromiscReceiveCallback(MakeCallback(&Node::PromiscReceiveFromDevice, this));
+        }
+      }
+      else
+      {
+        device->SetPromiscReceiveCallback(MakeCallback(&Node::PromiscReceiveFromDevice, this));
+      }
+    }
 
+    m_handlers.push_back(entry);
+  }
 
+  void
+  Node::UnregisterProtocolHandler(ProtocolHandler handler)
+  {
+    NS_LOG_FUNCTION(this << &handler);
+    for (ProtocolHandlerList::iterator i = m_handlers.begin();
+         i != m_handlers.end(); i++)
+    {
+      if (i->handler.IsEqual(handler))
+      {
+        m_handlers.erase(i);
+        break;
+      }
+    }
+  }
 
-  /**
-   * \returns true if checksums are enabled, false otherwise.
-   */
-  static bool ChecksumEnabled (void);
+  bool
+  Node::ChecksumEnabled(void)
+  {
+    NS_LOG_FUNCTION_NOARGS();
+    BooleanValue val;
+    g_checksumEnabled.GetValue(val);
+    return val.Get();
+  }
 
+  bool
+  Node::PromiscReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packet, uint16_t protocol,
+                                 const Address &from, const Address &to, NetDevice::PacketType packetType)
+  {
+    NS_LOG_FUNCTION(this << device << packet << protocol << &from << &to << packetType);
+    return ReceiveFromDevice(device, packet, protocol, from, to, packetType, true);
+  }
 
-protected:
-  /**
-   * The dispose method. Subclasses must override this method
-   * and must chain up to it by calling Node::DoDispose at the
-   * end of their own DoDispose method.
-   */
-  virtual void DoDispose (void);
-  virtual void DoInitialize (void);
-private:
+  bool
+  Node::NonPromiscReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packet, uint16_t protocol,
+                                    const Address &from)
+  {
+    NS_LOG_FUNCTION(this << device << packet << protocol << &from);
+    return ReceiveFromDevice(device, packet, protocol, from, device->GetAddress(), NetDevice::PacketType(0), false);
+  }
 
-  /**
-   * \brief Notifies all the DeviceAdditionListener about the new device added.
-   * \param device the added device to notify.
-   */
-  void NotifyDeviceAdded (Ptr<NetDevice> device);
+  bool
+  Node::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packet, uint16_t protocol,
+                          const Address &from, const Address &to, NetDevice::PacketType packetType, bool promiscuous)
+  {
+    NS_LOG_FUNCTION(this << device << packet << protocol << &from << &to << packetType << promiscuous);
+    NS_ASSERT_MSG(Simulator::GetContext() == GetId(), "Received packet with erroneous context ; "
+                                                          << "make sure the channels in use are correctly updating events context "
+                                                          << "when transferring events from one node to another.");
+    NS_LOG_DEBUG("Node " << GetId() << " ReceiveFromDevice:  dev "
+                         << device->GetIfIndex() << " (type=" << device->GetInstanceTypeId().GetName()
+                         << ") Packet UID " << packet->GetUid());
+    bool found = false;
 
-  /**
-   * \brief Receive a packet from a device in non-promiscuous mode.
-   * \param device the device
-   * \param packet the packet
-   * \param protocol the protocol
-   * \param from the sender
-   * \returns true if the packet has been delivered to a protocol handler.
-   */
-  bool NonPromiscReceiveFromDevice (Ptr<NetDevice> device, Ptr<const Packet> packet, uint16_t protocol, const Address &from);
-  /**
-   * \brief Receive a packet from a device in promiscuous mode.
-   * \param device the device
-   * \param packet the packet
-   * \param protocol the protocol
-   * \param from the sender
-   * \param to the destination
-   * \param packetType the packet type
-   * \returns true if the packet has been delivered to a protocol handler.
-   */
-  bool PromiscReceiveFromDevice (Ptr<NetDevice> device, Ptr<const Packet> packet, uint16_t protocol,
-                                 const Address &from, const Address &to, NetDevice::PacketType packetType);
-  /**
-   * \brief Receive a packet from a device.
-   * \param device the device
-   * \param packet the packet
-   * \param protocol the protocol
-   * \param from the sender
-   * \param to the destination
-   * \param packetType the packet type
-   * \param promisc true if received in promiscuous mode
-   * \returns true if the packet has been delivered to a protocol handler.
-   */
-  bool ReceiveFromDevice (Ptr<NetDevice> device, Ptr<const Packet>, uint16_t protocol,
-                          const Address &from, const Address &to, NetDevice::PacketType packetType, bool promisc);
+    for (ProtocolHandlerList::iterator i = m_handlers.begin();
+         i != m_handlers.end(); i++)
+    {
+      if (i->device == 0 ||
+          (i->device != 0 && i->device == device))
+      {
+        if (i->protocol == 0 ||
+            i->protocol == protocol)
+        {
+          if (promiscuous == i->promiscuous)
+          {
+            i->handler(device, packet, protocol, from, to, packetType);
+            found = true;
+          }
+        }
+      }
+    }
+    return found;
+  }
+  void
+  Node::RegisterDeviceAdditionListener(DeviceAdditionListener listener)
+  {
+    NS_LOG_FUNCTION(this << &listener);
+    m_deviceAdditionListeners.push_back(listener);
+    // and, then, notify the new listener about all existing devices.
+    for (std::vector<Ptr<NetDevice>>::const_iterator i = m_devices.begin();
+         i != m_devices.end(); ++i)
+    {
+      listener(*i);
+    }
+  }
+  void
+  Node::UnregisterDeviceAdditionListener(DeviceAdditionListener listener)
+  {
+    NS_LOG_FUNCTION(this << &listener);
+    for (DeviceAdditionListenerList::iterator i = m_deviceAdditionListeners.begin();
+         i != m_deviceAdditionListeners.end(); i++)
+    {
+      if ((*i).IsEqual(listener))
+      {
+        m_deviceAdditionListeners.erase(i);
+        break;
+      }
+    }
+  }
 
-  /**
-   * \brief Finish node's construction by setting the correct node ID.
-   */
-  void Construct (void);
-
-  /**
-   * \brief Protocol handler entry.
-   * This structure is used to demultiplex all the protocols.
-   */
-  struct ProtocolHandlerEntry {
-    ProtocolHandler handler; //!< the protocol handler
-    Ptr<NetDevice> device;   //!< the NetDevice
-    uint16_t protocol;       //!< the protocol number
-    bool promiscuous;        //!< true if it is a promiscuous handler
-  };
-
-  /// Typedef for protocol handlers container
-  typedef std::vector<struct Node::ProtocolHandlerEntry> ProtocolHandlerList;
-  /// Typedef for NetDevice addition listeners container
-  typedef std::vector<DeviceAdditionListener> DeviceAdditionListenerList;
-
-  uint32_t    m_id;         //!< Node id for this node
-  uint32_t    m_sid;        //!< System id for this node
-  double      power;
-  double      initialConsumption;
-  double      currentConsumption;
-  double      cpu;
-  double      memory;
-  double      transmission;
-  double      storage;
-  Time        lastSet;
-  EventId     outOfPowerEvent;
-
-  std::vector<Ptr<NetDevice> > m_devices; //!< Devices associated to this node
-  std::vector<Ptr<Application> > m_applications; //!< Applications associated to this node
-  ProtocolHandlerList m_handlers; //!< Protocol handlers in the node
-  DeviceAdditionListenerList m_deviceAdditionListeners; //!< Device addition listeners in the node
-};
+  void
+  Node::NotifyDeviceAdded(Ptr<NetDevice> device)
+  {
+    NS_LOG_FUNCTION(this << device);
+    for (DeviceAdditionListenerList::iterator i = m_deviceAdditionListeners.begin();
+         i != m_deviceAdditionListeners.end(); i++)
+    {
+      (*i)(device);
+    }
+  }
 
 } // namespace ns3
-
-#endif /* NODE_H */
